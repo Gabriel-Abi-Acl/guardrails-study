@@ -73,20 +73,24 @@ def load_tasks() -> list[Task]:
         raise ValueError("tasks.json must be a list")
     tasks = [Task.model_validate(item) for item in payload]
     seen: set[str] = set()
-    known = model_keys()
     for task in tasks:
         if task.id in seen:
             raise ValueError(f"duplicate task id: {task.id}")
         seen.add(task.id)
-        if task.model_key not in known:
-            raise ValueError(f"{task.id} has unknown model_key {task.model_key}")
-        try:
-            Draft202012Validator.check_schema(task.json_schema)
-        except SchemaError as exc:
-            raise ValueError(f"{task.id} has an invalid JSON Schema") from exc
-        for rule in task.rules:
-            _check_rule(task.id, rule)
+        validate_task_definition(task)
     return tasks
+
+
+def validate_task_definition(task: Task) -> None:
+    """Confere model_key, schema e regras. Não olha exemplos nem gabarito contra o texto."""
+    if task.model_key not in model_keys():
+        raise ValueError(f"{task.id} has unknown model_key {task.model_key}")
+    try:
+        Draft202012Validator.check_schema(task.json_schema)
+    except SchemaError as exc:
+        raise ValueError(f"{task.id} has an invalid JSON Schema") from exc
+    for rule in task.rules:
+        _check_rule(task.id, rule)
 
 
 def task_by_id(tasks: list[Task], task_id: str) -> Task:

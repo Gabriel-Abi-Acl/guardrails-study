@@ -1,6 +1,6 @@
 # guardrails-study
 
-Estudo técnico sobre como validar saída estruturada de modelos de linguagem. O recorte deste repositório é instrumental: quatro estratégias de guarda, um cliente de LLM agnóstico de provedor e um runner com orçamento de tentativas. As tarefas são sintéticas e públicas. Este repositório, no PR1, não contém resultado experimental.
+Estudo técnico sobre como validar saída estruturada de modelos de linguagem. O recorte deste repositório é instrumental: quatro estratégias de guarda, um cliente de LLM agnóstico de provedor e um runner com orçamento de tentativas. As tarefas são sintéticas e públicas. O repositório não contém resultado experimental.
 
 ## Objetivo
 
@@ -28,7 +28,7 @@ O re-ask só ajuda se o motivo devolvido for acionável e se ainda houver tentat
 
 ## Metodologia planejada
 
-Unidade experimental, a partir do PR2: uma tarefa sintética com instrução, texto-fonte, JSON Schema, modelo Pydantic, lista de regras e gabarito rotulado. PR1 fixa um placeholder de 10 tarefas para os testes. Nenhuma tarefa usa dado pessoal real. E-mails ficam em `example.com`. Identificadores são fictícios (`INV-1042`, `ORD-77`, `TRK-9`).
+Unidade experimental: uma tarefa sintética com instrução, texto-fonte, JSON Schema, modelo Pydantic, lista de regras e gabarito rotulado. O conjunto versionado está em `data/eval/tasks.v1.jsonl` e é descrito na seção Dataset de avaliação. A fixture de 10 tarefas em `guardrails_study/fixtures/tasks.json` continua só para os testes de guarda e do runner. Nenhuma tarefa usa dado pessoal real. E-mails ficam em `example.com`. Identificadores são fictícios (`INV-1042`, `ORD-77`, `TRK-9`; no dataset, `INV-2001`, `ORD-11`, `TRK-301`).
 
 Cada estratégia roda sozinha. Não há empilhamento de guardas: empilhar confundiria a origem da rejeição. O runner anota, por tentativa, a saída bruta, se foi aceita, qual guarda rejeitou, a latência medida com `time.perf_counter` em torno da chamada do gerador e da guarda, e tokens somente quando todas as chamadas da tentativa reportaram uso. O custo em USD só é preenchido se, além do uso, `PRICE_PROMPT_PER_MILLION` e `PRICE_COMPLETION_PER_MILLION` estiverem definidos. Ausência de uso ou de preço fica `null`. O código não inventa contagem de tokens nem preço.
 
@@ -55,6 +55,48 @@ Métricas que o PR3 deve calcular fora das guardas, sempre contra o gabarito, e 
 - tentativas, latência agregada, tokens e custo quando existirem.
 
 `examples.subtle`, na fixture atual, existe para o fake emitir o caso em que essas métricas divergem da decisão da guarda. Não é uma taxa.
+
+## Dataset de avaliação
+
+O conjunto experimental v1 está em `data/eval/tasks.v1.jsonl`: 45 linhas, uma tarefa por linha. O loader é `load_eval_tasks`. Esta seção não reporta resultado de modelo.
+
+Cada linha tem `id`, `category`, `instruction`, `source_text`, `json_schema`, `ground_truth`, `model_key`, `rules` e `examples` com `valid`, `malformed` e `subtle`. O `model_key` é um dos dez modelos Pydantic do PR1. `examples.valid` é o gabarito em JSON canônico (`json.dumps` com `sort_keys` e `ensure_ascii=False`), o mesmo texto que `script_from_labels` emite para o rótulo `valid`. `malformed` não é JSON. `subtle` é JSON que passa em schema, Pydantic e regras e difere do gabarito.
+
+Contagem por categoria primária. A categoria é o estresse que o loader reproduz com uma sonda.
+
+| Categoria | Itens | Sonda |
+| --- | ---: | --- |
+| `structural_breakage` | 12 | `malformed` não é JSON. O schema tem padrão, enum ou tamanho. Campo extra falha no schema e no Pydantic e passa nas regras. |
+| `type_coercion_bait` | 10 | Há um inteiro, número ou booleano. A sonda cita esse valor entre aspas. Schema, Pydantic e regras rejeitam. |
+| `calendar_business_rule` | 10 | Há `calendar_date`, `product_equals` ou `max_when_eq`. A sonda passa no schema, falha na regra e, no caso da data impossível, também no Pydantic. |
+| `unfaithful_extraction` | 13 | O `subtle` troca um texto que também está na fonte. As três guardas determinísticas aceitam. |
+
+Contagem por `model_key`. Cada tipo do PR1 aparece 4 ou 5 vezes.
+
+| `model_key` | Itens |
+| --- | ---: |
+| `invoice_total` | 5 |
+| `due_date` | 5 |
+| `contact_email` | 4 |
+| `ticket_priority` | 5 |
+| `line_item` | 5 |
+| `phone_e164` | 4 |
+| `shipment_delayed` | 5 |
+| `currency_amount` | 4 |
+| `action_items` | 4 |
+| `order_status` | 4 |
+
+Coerção e calendário/regra ficam nos tipos com inteiro, número, booleano, data, produto ou teto de SLA. E-mail, telefone, status e lista ficam em quebra estrutural e extração infiel. A contagem 12 / 10 / 10 / 13 segue essa concentração.
+
+Como foi construído: as tarefas foram escritas contra os schemas e as regras já suportados pelo PR1. O texto-fonte e o gabarito foram definidos juntos. Nenhum modelo preencheu o rótulo e não houve segundo anotador. O loader recusa o arquivo inteiro se um id repete, se o gabarito não passa no schema, no Pydantic e nas regras, se o `subtle` não passa nessas três guardas ou não difere do gabarito, se o `malformed` é JSON, ou se a sonda da categoria não se comporta como a tabela. Datas de calendário estão no texto como `DD/MM/AAAA` e no gabarito como ISO; a tarefa infiel de data repete as duas datas ISO na fonte, para o distrator ser literal. Enums de prioridade e status estão em português no texto e em código no JSON; o mapa fica na instrução (`alta=high`, `pago=paid`). Nas tarefas infiéis de status, o código em inglês também aparece na fonte, para o distrator ser literal.
+
+Limitações. São 45 itens sintéticos, de um autor. Isso não estima taxa de erro de modelo. O `subtle` não é a violação de calendário, de produto nem de SLA: por construção ele passa nas guardas determinísticas. A data `2024-02-31`, o total de linha incoerente e o SLA de prioridade `high` acima do teto são sondas do loader, não linhas do roteiro. A isca `"1990"` também não cabe em `malformed`, porque é JSON válido, nem em `subtle`, porque as guardas a rejeitam. Itens de `line_item` carregam `product_equals` mesmo quando a categoria primária é outra. A fixture de 10 tarefas permanece para os testes de guarda.
+
+```python
+from guardrails_study.dataset import load_eval_tasks
+
+tasks = load_eval_tasks()
+```
 
 ## Como rodar
 
@@ -92,10 +134,10 @@ print(result.valid, result.attempts, result.rejected_by)
 
 ## Roadmap
 
-- PR2: dataset completo e gabarito revisado, no lugar do placeholder de 10 tarefas.
+- PR2: dataset versionado em `data/eval/tasks.v1.jsonl` (45 tarefas sintéticas com gabarito). A fixture de 10 tarefas permanece para os testes de guarda. Sem métrica.
 - PR3: avaliação e métricas (escapa, falso rejeição, tentativas, latência, tokens e custo) sobre o runner deste PR.
 - PR4: experimentos com modelos reais e relatório. Sem números antes da execução registrada.
 
 ## O que este PR não faz
 
-Não chama API, não estima qualidade de modelo e não publica tabela de resultado. Empilhar as quatro guardas fica fora do desenho, porque misturaria a causa da rejeição.
+Não chama API, não estima qualidade de modelo e não publica tabela de resultado. Empilhar as quatro guardas fica fora do desenho, porque misturaria a causa da rejeição. O dataset do PR2 também não traz métrica de modelo.
