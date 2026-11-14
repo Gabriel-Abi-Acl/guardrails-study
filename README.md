@@ -11,7 +11,7 @@ Comparar quatro formas de decidir se a saída de um LLM pode ser aceita como JSO
 3. regras determinísticas (expressão regular e invariantes de negócio);
 4. um segundo LLM no papel de revisor.
 
-O que se quer medir nos PRs seguintes é a taxa de saída inválida que a guarda aceita, a taxa de falso rejeição contra o gabarito, o número de tentativas, a latência e o custo extra de tokens quando o provedor informa uso. PR1 constrói esses registros e os testes offline. Não mede um modelo real.
+O que se mede, fora da guarda, é a taxa de saída inválida que a guarda aceita, a taxa de falso rejeição contra o gabarito, o número de tentativas, a latência e o custo extra de tokens quando o provedor informa uso. A definição operacional está na seção Avaliação offline. PR1 constrói o registro de cada execução. Este arquivo não mede um modelo real.
 
 `valid` no registro significa "a guarda aceitou a saída final". Não significa "bate com o gabarito". Concordância com o gabarito é métrica do PR3, calculada fora da guarda.
 
@@ -48,13 +48,7 @@ Divisão de trabalho entre schema, Pydantic e regras, para as estratégias não 
 
 Cliente: `complete(messages)` devolve texto e, se houver, uso de tokens. `ScriptedLLM` entrega uma fila determinística. Os rótulos `valid`, `malformed` e `subtle` saem da fixture: `valid` é o gabarito serializado, `malformed` não é JSON, `subtle` é JSON factualmente errado que ainda satisfaz schema, modelo e regras. A fila não se recicla; acabou o roteiro, o fake levanta erro em vez de inventar texto. Os SDKs `openai` e `anthropic` só são importados na primeira chamada ao vivo e ficam num extra opcional. A suíte não usa rede nem chave.
 
-Métricas que o PR3 deve calcular fora das guardas, sempre contra o gabarito, e que este PR não reporta:
-
-- inválido que escapou: a guarda aceitou e o JSON parseado difere do gabarito;
-- falso rejeição: a guarda rejeitou e a saída era o gabarito;
-- tentativas, latência agregada, tokens e custo quando existirem.
-
-`examples.subtle`, na fixture atual, existe para o fake emitir o caso em que essas métricas divergem da decisão da guarda. Não é uma taxa.
+A comparação com o gabarito não entra na guarda. O harness da seção Avaliação offline lê o `RunResult` e calcula as taxas. `examples.subtle`, na fixture de 10 tarefas, existe para o fake emitir o caso em que a decisão da guarda e o gabarito divergem. Não é uma taxa.
 
 ## Dataset de avaliação
 
@@ -132,12 +126,71 @@ result = run_strategy("pydantic", task, generator, Settings())
 print(result.valid, result.attempts, result.rejected_by)
 ```
 
+## Avaliação offline
+
+O comando `evaluate-guards` (o mesmo que `python -m guardrails_study.evaluate`) percorre `data/eval/tasks.v1.jsonl`, executa uma estratégia ou `--strategy all`, e grava dois arquivos no diretório de `--output`:
+
+- `records.jsonl`: uma linha por tarefa e estratégia;
+- `summary.json`: agregado, quebra `by_strategy` (e, dentro dela, por categoria) e quebra `by_category` somando as estratégias pedidas.
+
+`valid` no registro continua sendo o aceite da guarda. A comparação com o gabarito é feita depois, neste harness, e não volta para o prompt.
+
+```bash
+uv run evaluate-guards --strategy all --scenario always_valid --output runs/pipeline-check
+uv run python -m guardrails_study.evaluate --strategy json_schema --scenario subtle --output runs/subtle-check
+```
+
+`runs/` está no `.gitignore`. Os arquivos `records.jsonl` e `summary.json` são substituídos se o diretório já existir. Não versionar essa saída.
+
+O backend padrão é o fake (`LLM_PROVIDER` vazio ou `fake`). `--scenario` escolhe a fila do gerador. O tamanho da fila é o orçamento da estratégia, e a fila não recicla.
+
+| Cenário | Gerador |
+| --- | --- |
+| `always_valid` | o gabarito em toda tentativa |
+| `malformed_then_valid` | o texto que não é JSON e, na tentativa seguinte, o gabarito |
+| `subtle` | o exemplo que passa nas guardas determinísticas e difere do gabarito |
+
+`json_schema` segue com uma tentativa. As outras estratégias usam `MAX_ATTEMPTS`. Em `second_llm` o fake também precisa de um revisor. O revisor scriptado aceita só o JSON igual ao gabarito e rejeita o resto, com motivo genérico (`not faithful to the source`), sem devolver o gabarito no texto de reparo. A guarda real não recebe o gabarito. O duplo não é um modelo: existe para o encanamento ter um veredito determinístico. Por isso, no cenário `subtle`, as três guardas determinísticas aceitam e o `second_llm` scriptado recusa até esgotar o orçamento. Isso é checagem de encanamento. Esses números não são achado sobre modelo e não devem ser citados como desempenho.
+
+O campo `note` do `summary.json`, no fake, repete o aviso em inglês: a saída é `pipeline check`, não achado de modelo.
+
+### Como ler cada métrica
+
+O denominador de toda taxa é `scored_count`: linhas com `status` igual a `ok`. Erro de transporte ou do provedor fica com `status` `error`. Nessa linha, `valid`, `matches_ground_truth`, `escaped_invalid`, `false_rejection`, `budget_exhausted`, tentativas realizadas, latência, tokens e custo ficam null. `max_attempts` ainda guarda o orçamento da estratégia, porque é configuração, não desfecho. A linha entra só em `error_count` e não é saída errada. Se a exceção ocorre no meio das tentativas, a tarefa inteira é erro: não há rejeição parcial. Se `scored_count` é zero, as taxas e as distribuições são null.
+
+- `acceptance_rate`: fração em que a guarda aceitou (`valid` true).
+- `escaped_invalid_rate`: fração em que a guarda aceitou e o JSON parseado difere do gabarito. Texto que não parseia conta como diferente.
+- `false_rejection_rate`: fração em que a guarda rejeitou e o JSON parseado é o gabarito.
+- `budget_exhaustion_rate`: fração em que a guarda rejeitou e as tentativas atingiram o orçamento. Aceitar na última tentativa não esgota.
+
+As quatro taxas não fecham em 1. Recusar JSON quebrado não é falso rejeição nem inválido que escapou.
+
+A igualdade com o gabarito ignora ordem de chave e espaço. Bool não equivale a 0 nem a 1. Int e float com o mesmo valor equivalem (`20` e `20.0`), porque o JSON do dataset não separa esses dois tokens.
+
+`attempts` e `latency_ms` trazem `mean`, `p50` e `p90` sobre as linhas ok. O percentil é nearest-rank: ordena a lista e toma a posição `ceil(p/100 * n)`, com a primeira posição em 1. Numa lista ordenada `[1, 2, 3, 4]`, p50 cai na posição 2 (valor 2) e p90 na posição 4 (valor 4). Com um único valor, p50 e p90 são esse valor.
+
+`prompt_tokens`, `completion_tokens` e `cost_usd` são somas. Cada campo é independente: se alguma linha ok tiver aquele campo null, a soma dele é null. Ausência não vira zero. O fake não informa uso, então essas somas saem null. O preço só aparece se o runner já tiver preenchido `cost_usd` (uso completo e as duas variáveis de preço). O harness não inventa token nem preço.
+
+`by_category` no topo soma as estratégias selecionadas. A categoria dentro de `by_strategy` não soma com as outras.
+
+### Provedor ao vivo
+
+`openai` e `anthropic` só seguem com `--allow-live` e com modelo e chave no ambiente
+(`LLM_MODEL` e `LLM_API_KEY`; no revisor, `CHECKER_MODEL` e `CHECKER_API_KEY`). Sem o flag
+ou sem a chave o processo termina com código 2 e não envia pedido. A mensagem de recusa
+não inclui o valor da chave. O flag não é exigido para o fake. `--scenario` vale só para
+o fake. O revisor ao vivo só entra se a estratégia pedida inclui `second_llm` e o gerador
+também é ao vivo. Gerador fake com `CHECKER_PROVIDER` openai ou anthropic sai com código 2
+mesmo com `--allow-live`: o fake não chama revisor ao vivo. Gerador ao vivo com revisor
+fake também sai com código 2, sem pedido. A suíte não percorre chamada real e este README
+não traz tabela de modelo.
+
 ## Roadmap
 
 - PR2: dataset versionado em `data/eval/tasks.v1.jsonl` (45 tarefas sintéticas com gabarito). A fixture de 10 tarefas permanece para os testes de guarda. Sem métrica.
-- PR3: avaliação e métricas (escapa, falso rejeição, tentativas, latência, tokens e custo) sobre o runner deste PR.
+- PR3: `evaluate-guards` grava `records.jsonl` e `summary.json` com as taxas contra o gabarito. O backend padrão é o fake; o número que ele produz é checagem de encanamento, não resultado de modelo.
 - PR4: experimentos com modelos reais e relatório. Sem números antes da execução registrada.
 
-## O que este PR não faz
+## O que fica de fora
 
-Não chama API, não estima qualidade de modelo e não publica tabela de resultado. Empilhar as quatro guardas fica fora do desenho, porque misturaria a causa da rejeição. O dataset do PR2 também não traz métrica de modelo.
+A suíte não chama API e este arquivo não publica tabela de resultado de modelo. O fake do harness não substitui essa tabela: a saída dele é checagem de encanamento. Empilhar as quatro guardas fica fora do desenho, porque misturaria a causa da rejeição.

@@ -7,3 +7,6 @@ __pycache__/
 dist/
 build/
 .env
+
+# Saídas locais do harness. Não são resultado versionado.
+runs/

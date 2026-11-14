@@ -15,6 +15,9 @@ live = [
   "openai>=1.55.0",
 ]
 
+[project.scripts]
+evaluate-guards = "guardrails_study.evaluate:main"
+
 [dependency-groups]
 dev = [
   "pytest>=8.3.0",
