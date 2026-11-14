@@ -33,6 +33,7 @@ def test_env_example_is_the_only_env_file_and_has_no_secret():
         "## Objetivo",
         "## Hipótese",
         "## Metodologia planejada",
+        "## Dataset de avaliação",
         "## Como rodar",
         "## Roadmap",
     ],
