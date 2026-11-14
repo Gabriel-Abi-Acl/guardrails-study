@@ -1,0 +1,43 @@
+[project]
+name = "guardrails-study"
+version = "0.1.0"
+description = "Comparative study of guards for LLM structured output."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "jsonschema>=4.23.0",
+  "pydantic>=2.10.0",
+]
+
+[project.optional-dependencies]
+live = [
+  "anthropic>=0.40.0",
+  "openai>=1.55.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["guardrails_study"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["guardrails_study", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["guardrails_study"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
